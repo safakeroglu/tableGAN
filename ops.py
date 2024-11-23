@@ -2,22 +2,7 @@ import math
 import numpy as np
 import tensorflow as tf
 
-from tensorflow.python.framework import ops
-
 from utils import *
-
-try:
-    image_summary = tf.image_summary
-    scalar_summary = tf.scalar_summary
-    histogram_summary = tf.histogram_summary
-    merge_summary = tf.merge_summary
-    SummaryWriter = tf.train.SummaryWriter
-except:
-    image_summary = tf.summary.image
-    scalar_summary = tf.summary.scalar
-    histogram_summary = tf.summary.histogram
-    merge_summary = tf.summary.merge
-    SummaryWriter = tf.summary.FileWriter
 
 if "concat_v2" in dir(tf):
     def concat(tensors, axis, *args, **kwargs):
@@ -29,119 +14,122 @@ else:
 
 class batch_norm(object):
     def __init__(self, epsilon=1e-5, momentum=0.9, name="batch_norm"):
-        with tf.variable_scope(name):
-            self.epsilon = epsilon
-            self.momentum = momentum
-            self.name = name
-
+        self.epsilon = epsilon
+        self.momentum = momentum
+        self.name = name
+        
     def __call__(self, x, train=True):
-        return tf.contrib.layers.batch_norm(x,
-                                            decay=self.momentum,
-                                            updates_collections=None,
-                                            epsilon=self.epsilon,
-                                            scale=True,
-                                            is_training=train,
-                                            scope=self.name)
+        return tf.keras.layers.BatchNormalization(
+            epsilon=self.epsilon,
+            momentum=self.momentum,
+            name=self.name
+        )(x, training=train)
 
 
 def conv_cond_concat(x, y):
     """Concatenate conditioning vector on feature map axis."""
-    x_shapes = x.get_shape()
-    y_shapes = y.get_shape()
-    return concat([
-        x, y * tf.ones([x_shapes[0], x_shapes[1], x_shapes[2], y_shapes[3]])], 3)
+    x_shapes = tf.shape(x)
+    y_shapes = tf.shape(y)
+    return tf.concat([
+        x, y * tf.ones([x_shapes[0], x_shapes[1], x_shapes[2], y_shapes[3]])
+    ], axis=3)
 
 
-def conv2d(input_, output_dim,
-           k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02,
-           name="conv2d"):
-    with tf.variable_scope(name):
-        w = tf.get_variable('w', [k_h, k_w, input_.get_shape()[-1], output_dim],
-                            initializer=tf.truncated_normal_initializer(stddev=stddev))
-
-        conv = tf.nn.conv2d(input_, w, strides=[1, d_h, d_w, 1], padding='SAME')
-
-        biases = tf.get_variable('biases', [output_dim], initializer=tf.constant_initializer(0.0))
-        conv = tf.reshape(tf.nn.bias_add(conv, biases), conv.get_shape())
-
-        return conv
+def conv2d(input_, output_dim, k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02, name="conv2d"):
+    return tf.keras.layers.Conv2D(
+        filters=output_dim,
+        kernel_size=(k_h, k_w),
+        strides=(d_h, d_w),
+        padding='same',
+        kernel_initializer=tf.keras.initializers.TruncatedNormal(stddev=stddev),
+        bias_initializer='zeros',
+        name=name
+    )(input_)
 
 
-def deconv2d(input_, output_shape,
-             k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02,
+def deconv2d(input_, output_shape, k_h=5, k_w=5, d_h=2, d_w=2, stddev=0.02,
              name="deconv2d", with_w=False):
-    with tf.variable_scope(name):
-
-        # filter : [height, width, output_channels, in_channels]
-        w = tf.get_variable('w', [k_h, k_w, output_shape[-1], input_.get_shape()[-1]],
-                            initializer=tf.random_normal_initializer(stddev=stddev))
-
-        try:
-            deconv = tf.nn.conv2d_transpose(input_, w, output_shape=output_shape,
-                                            strides=[1, d_h, d_w, 1])
-
-        # Support for verisons of TensorFlow before 0.7.0
-        except AttributeError:
-            deconv = tf.nn.deconv2d(input_, w, output_shape=output_shape,
-                                    strides=[1, d_h, d_w, 1])
-
-        biases = tf.get_variable('biases', [output_shape[-1]], initializer=tf.constant_initializer(0.0))
-        deconv = tf.reshape(tf.nn.bias_add(deconv, biases), deconv.get_shape())
-
-        if with_w:
-            return deconv, w, biases
-        else:
-            return deconv
+    filters = output_shape[-1]
+    
+    deconv_layer = tf.keras.layers.Conv2DTranspose(
+        filters=filters,
+        kernel_size=(k_h, k_w),
+        strides=(d_h, d_w),
+        padding='same',
+        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=stddev),
+        bias_initializer='zeros',
+        name=name
+    )
+    
+    deconv = deconv_layer(input_)
+    
+    if with_w:
+        return (
+            deconv,
+            deconv_layer.kernel,
+            deconv_layer.bias
+        )
+    return deconv
 
 
 def lrelu(x, leak=0.2, name="lrelu"):
-    return tf.maximum(x, leak * x)
+    return tf.keras.layers.LeakyReLU(alpha=leak, name=name)(x)
 
 
 def linear(input_, output_size, scope=None, stddev=0.02, bias_start=0.0, with_w=False):
-    shape = input_.get_shape().as_list()
-
-    # print( "Linear shape = " + str(shape) )
-
-    with tf.variable_scope(scope or "Linear"):
-
-        matrix = tf.get_variable("Matrix", [shape[1], output_size], tf.float32,
-                                 tf.random_normal_initializer(stddev=stddev))
-
-        bias = tf.get_variable("bias", [output_size],
-                               initializer=tf.constant_initializer(bias_start))
-
-        if with_w:
-            return tf.matmul(input_, matrix) + bias, matrix, bias
-        else:
-            return tf.matmul(input_, matrix) + bias
+    dense_layer = tf.keras.layers.Dense(
+        units=output_size,
+        kernel_initializer=tf.keras.initializers.RandomNormal(stddev=stddev),
+        bias_initializer=tf.keras.initializers.Constant(bias_start),
+        name=scope
+    )
+    
+    output = dense_layer(input_)
+    
+    if with_w:
+        return output, dense_layer.kernel, dense_layer.bias
+    return output
 
 
-def masking(input, label_col, attrib_num):
-    i_shape = input.get_shape().as_list()
-
-    print("i_shape = " + str(i_shape))  # 64 * 8* 8 * 1 , 64 * 16 * 16 *1
-
-    # input data  is flatten version of G
-    temp = tf.reshape(input, [i_shape[0], -1])
-    t_shape = temp.get_shape().as_list()
-    print("t_shape = " + str(t_shape))  # 64 * 64 , 64*256
-
-    # Masking Label Columns
-    mask = np.zeros(t_shape)
-
-    # A tensor with shape of GC having True in all elements
-    mask = np.equal(mask, mask)
-
+def masking(input_tensor, label_col, attrib_num):
+    # Get input shape
+    i_shape = tf.shape(input_tensor)
+    batch_size = i_shape[0]
+    
+    # Flatten the input
+    temp = tf.reshape(input_tensor, [batch_size, -1])
+    t_shape = tf.shape(temp)
+    
+    # Create mask
+    mask = np.zeros([batch_size, t_shape[1]])
+    mask = np.equal(mask, mask)  # All True matrix
+    
+    # Mask label columns
     mask_col = label_col
-
-    # Masking all label columns in cases that the inital data has been duplicated
     for i in range(t_shape[1] // attrib_num):
         mask[:, mask_col] = False
         mask_col += attrib_num
+    
+    # Convert mask to tensor and apply
+    mask_tensor = tf.constant(mask)
+    masked = tf.where(mask_tensor, temp, tf.zeros_like(temp))
+    
+    # Reshape back to original shape
+    return tf.reshape(masked, i_shape)
 
-    inp_mask = tf.constant(mask)
 
-    temp = tf.where(inp_mask, temp, tf.zeros_like(temp))
-
-    return tf.reshape(temp, i_shape)
+class Logger:
+    def __init__(self, log_dir):
+        self.summary_writer = tf.summary.create_file_writer(log_dir)
+    
+    def log_scalar(self, name, value, step):
+        with self.summary_writer.as_default():
+            tf.summary.scalar(name, value, step=step)
+    
+    def log_image(self, name, images, step):
+        with self.summary_writer.as_default():
+            tf.summary.image(name, images, step=step)
+    
+    def log_histogram(self, name, values, step):
+        with self.summary_writer.as_default():
+            tf.summary.histogram(name, values, step=step)

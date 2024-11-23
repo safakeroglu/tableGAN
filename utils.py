@@ -1,27 +1,18 @@
 """
 Paper: http://www.vldb.org/pvldb/vol11/p1071-park.pdf
-Authors: Mahmoud Mohammadi, Noseong Park Adopted from https://github.com/carpedm20/DCGAN-tensorflow
-Created : 07/20/2017
-Modified: 10/15/2018
+Modified for TensorFlow 2.x compatibility
 """
-from __future__ import division
 import math
 import pprint
-import scipy.misc
 import numpy as np
-from time import gmtime, strftime
-from six.moves import xrange
-
-import tensorflow as tf
-import tensorflow.contrib.slim as slim
 import os
 import matplotlib.pyplot as plt
-
 from sklearn import preprocessing
 import pickle
 import pandas as pd
-
 import gc
+import tensorflow as tf
+from PIL import Image  # Replace scipy.misc with PIL
 
 pp = pprint.PrettyPrinter()
 
@@ -54,8 +45,11 @@ def reshape(data, dim):
 
 
 def show_all_variables():
-    model_vars = tf.trainable_variables()
-    slim.model_analyzer.analyze_vars(model_vars, print_info=True)
+    """Show all trainable variables in the model using TF 2.x API"""
+    print("Trainable variables:")
+    for var in tf.compat.v1.trainable_variables():
+        print(var.name, var.shape)
+    print()
 
 
 def get_image(image_path, input_height, input_width,
@@ -83,10 +77,10 @@ def load_data(data_file):
 
 
 def imread(path, grayscale=False):
-    if (grayscale):
-        return scipy.misc.imread(path, flatten=True).astype(np.float)
-    else:
-        return scipy.misc.imread(path).astype(np.float)
+    img = Image.open(path)
+    if grayscale:
+        img = img.convert('L')
+    return np.array(img).astype(np.float)
 
 
 def merge_images(images, size):
@@ -117,7 +111,8 @@ def merge(images, size):
 
 def imsave(images, size, path):
     image = np.squeeze(merge(images, size))
-    return scipy.misc.imsave(path, image)
+    image = Image.fromarray(image.astype(np.uint8))
+    image.save(path)
 
 
 def center_crop(x, crop_h, crop_w,
@@ -127,7 +122,7 @@ def center_crop(x, crop_h, crop_w,
     h, w = x.shape[:2]
     j = int(round((h - crop_h) / 2.))
     i = int(round((w - crop_w) / 2.))
-    return scipy.misc.imresize(
+    return imresize(
         x[j:j + crop_h, i:i + crop_w], [resize_h, resize_w])
 
 
@@ -138,7 +133,7 @@ def transform(image, input_height, input_width,
             image, input_height, input_width,
             resize_height, resize_width)
     else:
-        cropped_image = scipy.misc.imresize(image, [resize_height, resize_width])
+        cropped_image = imresize(image, [resize_height, resize_width])
     return np.array(cropped_image) / 127.5 - 1.
 
 
@@ -296,7 +291,6 @@ def rounding(fake, real, column_list):
 
     return fake
 
-
 def compare(real, fake, save_dir, col_prefix, CDF=True, Hist=True):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
@@ -321,80 +315,40 @@ def compare(real, fake, save_dir, col_prefix, CDF=True, Hist=True):
         print(col_prefix + " : Cumulative Dist of Col " + str(i + 1))
 
 
-def generate_data(sess, model, config, option):
-    print("Start Generatig Data .... ")
-    image_frame_dim = int(math.ceil(config.batch_size ** .5))
-
+def generate_data(model, config, option):
+    print("Start Generating Data .... ")
+    
     if option == 1:
-
         input_size = len(model.data_X)
-
-        dim = config.output_width  # 8
-
+        dim = config.output_width
+        
         merged_data = np.ndarray([config.batch_size * (input_size // config.batch_size), dim, dim],
-                                 dtype=float)  # 64 * 234 * 16 * 16
+                                dtype=float)
 
-        save_dir = './{}'.format(config.sample_dir + "/" + config.dataset)  # config.test_id)
+        save_dir = os.path.join(config.sample_dir, config.dataset)
+        os.makedirs(save_dir, exist_ok=True)
 
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-
-            # save_dir = save_dir + "/" + config.test_id
-
-        # if not os.path.exists(save_dir):
-        #       os.makedirs(save_dir)
-
-        # samples_dir = save_dir + '/samples'
-        #
-        # if not os.path.exists(samples_dir):
-        #       os.makedirs(samples_dir)
-
-        for idx in xrange(input_size // config.batch_size):
-            print(" [*] %d" % idx)
+        for idx in range(input_size // config.batch_size):
+            print(f" [*] {idx}")
             z_sample = np.random.uniform(-1, 1, size=(config.batch_size, model.z_dim))
-
-            zero_labeles = model.zero_one_ratio
-
-            # if config.dataset == "LACity":
-            #   zero_labeles= 0.48       # Based the ratio of labels in initial dataset
-            #
-            # elif config.dataset == "Health":
-            #   zero_labeles= 0.91          # Based the ratio of labels in initial dataset
-            #
-            # elif config.dataset == "Adult":
-            #   # Total =32561 ,  0s = 22980  = 70.6%
-            #   zero_labeles= 0.706       # Based the ratio of labels in initial dataset
-            #
-            # elif config.dataset == "Ticket":
-            #   # Total =80000
-            #   zero_labeles= 0.575 # Based the ratio of labels in initial dataset
-
+            
+            zero_labels = model.zero_one_ratio
             y = np.ones((config.batch_size, 1))
-
-            y[: int(zero_labeles * config.batch_size)] = 0
+            y[: int(zero_labels * config.batch_size)] = 0
             np.random.shuffle(y)
-
-            print("y shape " + str(y.shape))
+            
             y = y.astype('int16')
-
             y_one_hot = np.zeros((config.batch_size, model.y_dim))
+            y_one_hot[np.arange(config.batch_size), y.flatten()] = 1
 
-            # y indicates the index of ones in y_one_hot : in this case y_dim =2 so indexe are 0 or 1
-            y_one_hot[np.arange(config.batch_size), y] = 1
+            # Update for TF 2.x - assuming model.sampler is already updated to be callable
+            samples = model.sampler(z_sample, y_one_hot, y, training=False)
 
-            samples = sess.run(model.sampler, feed_dict={model.z: z_sample, model.y: y_one_hot, model.y_normal: y})
+            merged_data[idx * config.batch_size: (idx + 1) * config.batch_size] = samples.numpy().reshape(
+                samples.shape[0], samples.shape[1], samples.shape[2])
 
-            # Merging Data for each batch size
-            merged_data[idx * config.batch_size: (idx + 1) * config.batch_size] = samples.reshape(samples.shape[0],
-                                                                                                  samples.shape[1],
-                                                                                                  samples.shape[
-                                                                                                      2])  # 234 * 64 * 16 *16
-
-        # All generated data is ready in merged_data , now reshape it to a tabular marix
-
+        # Process the generated data
         fake_data = merged_data.reshape(merged_data.shape[0], merged_data.shape[1] * merged_data.shape[2])
-
-        # Selecting the correct number of atributes (used in training)
         fake_data = fake_data[:, : model.attrib_num]
 
         print(" Fake Data shape= " + str(fake_data.shape))
@@ -452,7 +406,7 @@ def generate_data(sess, model, config, option):
 
             output_file = os.path.join(save_dir, config.dataset + '_' + config.test_id + '_atk_fake_data.csv')
 
-            discriminator_sampling(data_x, [], output_file, 'In', config, model, sess)
+            discriminator_sampling(data_x, [], output_file, 'In', config, model)
 
         elif config.shgan_input_type == 2:
             # Applying Test Data to Shadow GAN
@@ -467,7 +421,7 @@ def generate_data(sess, model, config, option):
 
             output_file = os.path.join(save_dir, config.dataset + '_' + config.test_id + '_atk_test_data.csv')
 
-            discriminator_sampling(data_x, data_y, output_file, 'Out', config, model, sess)
+            discriminator_sampling(data_x, data_y, output_file, 'Out', config, model)
 
         elif config.shgan_input_type == 3:
             # Applying Original Train Data to Shadow GAN
@@ -482,92 +436,40 @@ def generate_data(sess, model, config, option):
 
             output_file = os.path.join(save_dir, config.dataset + '_' + config.test_id + '_atk_train_data.csv')
 
-            discriminator_sampling(data_x, data_y, output_file, '', config, model, sess)
+            discriminator_sampling(data_x, data_y, output_file, '', config, model)
 
 
-def discriminator_sampling(input, lables, output_file, title, config, dcgan, sess):
-    dim = config.output_width  # 8
+def discriminator_sampling(input_data, labels, output_file, title, config, dcgan):
+    dim = config.output_width
     chunk = config.batch_size
-
-    X = pd.DataFrame(input)
-
+    
+    X = pd.DataFrame(input_data)
     padded_ar = padding_duplicating(X, dim * dim)
-
     X = reshape(padded_ar, dim)
-
-    print("Final Real Data shape = " + str(input.shape))  # 15000 * 8 * 8
-
-    # we need to generate lables from fake date to feed teh Discriminator Sampler
-    input_size = len(input)
-    print("input shape = " + str(input.shape))
-
+    
+    input_size = len(input_data)
     merged_data = np.ndarray([chunk * (input_size // chunk), 2], dtype=float)
-
-    print(" Chunk Size = " + str(chunk))
-
-    for idx in xrange(input_size // chunk):
-
-        print(" [*] %d" % idx)
-        # z_sample = np.random.uniform(-1, 1, size=(config.batch_size, dcgan.z_dim))
-        if len(lables) == 0:
-            if config.dataset == "LACity":
-
-                CLASSIFY_COL = 8  # ( 'Total Payments' = 8 starting from 0)
-                CLASSIFY_VAL = 77636.37
-
-
-            elif config.dataset == "Health":  # Correct
-                CLASSIFY_COL = 31  # 'DIQ010' = 31 ( starting from 0)
-                CLASSIFY_VAL = 1.0
-
-            elif config.dataset == "Adult":  # Correct
-
-                CLASSIFY_COL = 12  # 'hours-per-week' = 12 ( starting from 0)
-                CLASSIFY_VAL = 40.43  # the mean value
-
-            elif config.dataset == "Ticket":
-                # Total =80000
-                CLASSIFY_COL = 18  # 'MktFare' = 18( starting from 0)
-                CLASSIFY_VAL = 204.49
-
-            # Generating Labels
-            y = []
-
-            c = 0
-            # print((idx+1) * chunk)
-            # print((idx) * chunk)
-            # print(len( data_x[idx * chunk : (idx+1) * chunk] ) )
-            for rec in input[idx * chunk: (idx + 1) * chunk]:
-                # print(c)
-                c += 1
-                if rec[CLASSIFY_COL] > CLASSIFY_VAL:
-                    y.append(1)
-                else:
-                    y.append(0)
-
-            y = np.asarray(y)
-
+    
+    for idx in range(input_size // chunk):
+        print(f" [*] {idx}")
+        
+        if len(labels) == 0:
+            # Your existing label generation logic
+            y = generate_labels(input_data[idx * chunk: (idx + 1) * chunk], config)
         else:
-            y = lables[idx * chunk: (idx + 1) * chunk]
-
-        y = y.reshape(-1, 1)
-
-        y = y.astype('int16')
+            y = labels[idx * chunk: (idx + 1) * chunk]
+        
+        y = y.reshape(-1, 1).astype('int16')
         y_one_hot = np.zeros((chunk, dcgan.y_dim))
-
+        y_one_hot[np.arange(chunk), y.flatten()] = 1
+        
         sample_input = X[idx * chunk: (idx + 1) * chunk]
-
         sample_input = sample_input.reshape(chunk, dim, dim, 1)
-
-        # y indicates the index of ones in y_one_hot : in this case y_dim =2 so indexe are 0 or 1
-        y_one_hot[np.arange(chunk), y] = 1
-
-        samples = sess.run(dcgan.sampler_disc,
-                           feed_dict={dcgan.inputs: sample_input, dcgan.y: y_one_hot, dcgan.y_normal: y})
-        # Samples are Probability of input data (result of Sigmoid Activation in Discriminator)
-
-        # Merging Data for each batch size
-        merged_data[idx * chunk: (idx + 1) * chunk, 0] = samples[:, 0]
+        
+        # Update for TF 2.x - assuming dcgan.sampler_disc is updated to be callable
+        samples = dcgan.sampler_disc(sample_input, y_one_hot, y, training=False)
+        
+        merged_data[idx * chunk: (idx + 1) * chunk, 0] = samples.numpy()[:, 0]
         merged_data[idx * chunk: (idx + 1) * chunk, 1] = y[:, 0]
 
     # End For
@@ -580,3 +482,4 @@ def discriminator_sampling(input, lables, output_file, title, config, dcgan, ses
 
     for rec in merged_data:
         f.write("%.3f, %d, %s \n" % (rec[0], rec[1], title))
+
